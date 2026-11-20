@@ -73,6 +73,7 @@ if "!TIER!"=="3" set "QARGS=--quality fine"
 if "!TIER!"=="3" set "TIERNAME=精细"
 if "!TIER!"=="4" set "QARGS=--quality max"
 if "!TIER!"=="4" set "TIERNAME=极致"
+if not defined ASK set "TIERNAME=命令行"
 
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%t"
 set "OUT=%~dp0out\mine\!NAME!_GemaiS8_!TIERNAME!_%TS%"
