@@ -1,4 +1,4 @@
-# 许可声明 / License
+# 模型权重许可 / Model weights license
 
 ## 模型权重：仅限非商业用途
 
@@ -33,11 +33,11 @@ https://creativecommons.org/licenses/by-nc/4.0/deed.zh-hans
 
 ## 代码
 
-除第三方组件外的源代码，版权归 Gemai 作者所有，暂未以开源许可发布。仓库目前为私有，未经许可请勿再分发。
+除第三方组件外的源代码以 MIT 许可开源，见 [LICENSE](LICENSE)。MIT 许可只适用于代码，不适用于上面列出的模型权重。
 
 ---
 
 **English summary.** The Gemai model weights and statistics files in this repository are licensed under
 CC BY-NC 4.0: **no commercial use** of the weights or of charts generated with them. Attribution is required.
 Bundled third-party components keep their own licenses (MERT-v1-330M: CC BY-NC 4.0; FFmpeg: GPL v3; see THIRD_PARTY.md).
-The Gemai source code is not released under an open-source license.
+The Gemai source code is released under the MIT License (see LICENSE); the MIT License does not cover the model weights.

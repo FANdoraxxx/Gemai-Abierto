@@ -2,7 +2,7 @@
 
 从音频生成 maimai DX 谱面（`maidata.txt`）的精简发行版。写谱模型是从 Gemai 大底模Shannon蒸馏出的小模型 **S8**（约 2000 万参数）。
 
-> ⚠️ 模型权重仅限非商业用途（CC BY-NC 4.0），见 [LICENSE.md](LICENSE.md)。
+> 代码：MIT 许可（[LICENSE](LICENSE)）。⚠️ 模型权重：仅限非商业用途（CC BY-NC 4.0，[LICENSE-WEIGHTS.md](LICENSE-WEIGHTS.md)）。
 
 原理、训练过程和设计取舍见 [docs/Gemai_原理与技术.md](docs/Gemai_原理与技术.md)。
 
@@ -60,7 +60,9 @@ docs/                     原理与技术文档
 
 ## 许可
 
-**Gemai 的模型权重以 CC BY-NC 4.0 提供，禁止商业使用**（包括用它生成的谱面），使用时需注明出处。详见 [LICENSE.md](LICENSE.md)。
+- **代码**：MIT 许可，见 [LICENSE](LICENSE)。可以自由使用、修改和再分发（包括商业用途），保留版权声明即可。
+- **模型权重**：CC BY-NC 4.0，**禁止商业使用**（包括用它生成的谱面），使用时需注明出处，见 [LICENSE-WEIGHTS.md](LICENSE-WEIGHTS.md)。
+- **第三方组件**：各自保留原许可，见下文与 [THIRD_PARTY.md](THIRD_PARTY.md)。
 
 ## 第三方组件
 
