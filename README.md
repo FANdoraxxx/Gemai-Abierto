@@ -1,6 +1,6 @@
 # Gemai Abierto
 
-从音频生成 maimai DX 谱面（`maidata.txt`）的精简发行版。写谱模型是从 Gemai 大底模蒸馏出的小模型 **S8**（约 2000 万参数）。
+从音频生成 maimai DX 谱面（`maidata.txt`）的精简发行版。写谱模型是从 Gemai 大底模Shannon蒸馏出的小模型 **S8**（约 2000 万参数）。
 
 原理、训练过程和设计取舍见 [docs/Gemai_原理与技术.md](docs/Gemai_原理与技术.md)。
 
