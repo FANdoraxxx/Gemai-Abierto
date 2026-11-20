@@ -19,6 +19,7 @@ set "TORCH_INDEX=https://download.pytorch.org/whl/cpu"
 set "TORCH_KIND=CPU"
 where nvidia-smi >nul 2>nul && nvidia-smi >nul 2>nul && set "TORCH_INDEX=https://download.pytorch.org/whl/cu124" && set "TORCH_KIND=CUDA 12.4"
 if defined GEMAI_TORCH_INDEX set "TORCH_INDEX=%GEMAI_TORCH_INDEX%"
+if defined GEMAI_TORCH_INDEX set "TORCH_KIND=%GEMAI_TORCH_INDEX%"
 echo [2/2] 安装 PyTorch（%TORCH_KIND%）和 requirements.txt
 ".venv\Scripts\python.exe" -m pip install torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url %TORCH_INDEX% || goto fail
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt || goto fail
