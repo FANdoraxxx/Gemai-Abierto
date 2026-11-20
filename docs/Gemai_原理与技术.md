@@ -384,8 +384,13 @@ TGT  BDI_0 RPI_0 <第0小节> BARM  BDI_1 RPI_1 <第1小节> BARM ...  EOS
 | 段落预测与目标统计 | `out/plan/`、`scratch/plan/` | 只看音频预测段落，用于规划器输入 |
 | 校准与统计表 | `weights/calibration_bigB_r3.json`、`release/gemai/work/` | 难度、密度、手部目标等，只含统计量，不含谱面 |
 | 节拍跟踪 | `weights/torch/hub/checkpoints/beat_this-final0.ckpt` | beat_this（第 2 节） |
-| 音乐特征 | `work/hf_cache/.../MERT-v1-330M` | MERT-330M，由 setup.bat 下载权重 |
+| 音乐特征 | `work/hf_cache/.../MERT-v1-330M` | MERT-330M（m-a-p，CC BY-NC 4.0），权重转存为 15 个 safetensors 分片，数值不变 |
+| 音频解码 | `third_party/ffmpeg/` | FFmpeg（GPL v3），作为独立程序调用 |
 | 无理检测 | `release/gemai/third_party/muri-extracted/maimuridx` | MaiMuriDX 核心（第 6.3 节） |
 
 本发行版不包含任何训练数据、官谱、自制谱或生成结果。
 
+**CPU 模式**：没有 NVIDIA 显卡时，生成全程在 CPU 上运行（MERT 特征提取、规划器、写谱模型都一样），结果与显卡版同一套模型，只是更慢。S8 只有约 2000 万参数，正是 CPU 也能用的原因之一；耗时的大头反而是 3 亿参数的 MERT 特征提取，每首歌只需要做一次，结果会缓存。CPU 模式下注意力计算固定使用 PyTorch 的通用实现。
+
+
+**许可**：本发行版中的 Gemai 模型权重以 CC BY-NC 4.0 提供，禁止商业使用（含生成的谱面），见仓库根目录 `LICENSE.md`。

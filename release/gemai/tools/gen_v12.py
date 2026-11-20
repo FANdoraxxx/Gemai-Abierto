@@ -170,7 +170,16 @@ def main(argv=None):
     else:
         os.environ.pop("MAI_BD_OVERRIDE", None)
     import torch
-    torch.set_num_threads(1)
+    import contextlib
+    on_cpu = str(a.device).lower().startswith("cpu")
+    # CPU mode (no NVIDIA GPU): use several threads, and the plain "math" attention kernel
+    # (the fused CPU attention kernel of torch 2.6 crashed with an access violation on the writer's song cross-attention).
+    torch.set_num_threads(int(os.environ.get("MAI_CPU_THREADS", max(1, (os.cpu_count() or 2) // 2))) if on_cpu else 1)
+    if on_cpu:
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        attn_ctx = sdpa_kernel(SDPBackend.MATH)
+    else:
+        attn_ctx = contextlib.nullcontext()
     template = json.loads((TREE / "planner" / "_writer_template.json").read_text(encoding="utf-8"))
     options = build_options(a, template)
     t0 = time.perf_counter()
@@ -178,7 +187,8 @@ def main(argv=None):
     t_load = time.perf_counter() - t0
     print(f"[v12] audio={audio.name} level={a.level} slot={options.slot} seed={a.seed} writer={a.checkpoint} device={a.device} planner={'off' if (a.no_planner or a.plan_file) else cfg['planner']['dir']}", flush=True)
     try:
-        info = eng.generate(str(audio), options, out=str(out), title=title, artist=a.artist)
+        with attn_ctx:
+            info = eng.generate(str(audio), options, out=str(out), title=title, artist=a.artist)
     except PlanOnlyDone:
         info = None
     if eng.last_plan is not None:
