@@ -1,0 +1,18 @@
+{
+  "_readme": "Gemai Abierto (S8): BD density planner + distilled 20M-parameter writer. Paths are relative to the repository root.",
+  "writer": {
+    "checkpoint": "weights/gemai_s8.pt",
+    "meta": "release/gemai/work/meta.json",
+    "calib_file": "weights/calibration_bigB_r3.json",
+    "window_candidates": 6,
+    "quality": "fast",
+    "auto_level_bias": -0.1
+  },
+  "planner": {
+    "enabled": true,
+    "dir": "release/gemai/planner",
+    "device": "cpu",
+    "setting": "cal3_g4 (g=0.4 alpha=0.4 spread=1.0 tail=0.7 lvl=1.0; 5 folds x 16 AR samples at T=1.0, MBR, tail damping, rank-remap)"
+  },
+  "device": "cuda:0"
+}

@@ -1,0 +1,17 @@
+{
+  "upstream": "Minepig/MaiMuriDX",
+  "commit": "0ebab7ff6853a159ef6af76d9e3c43b23157bb5e",
+  "sha256": {
+    "action.py": "1d14b66e06a527bac437bda435389a214294d4e738a4ca00ca6db6ddfd6a64ba",
+    "config.json": "0cad4fe62911fcb925b22a8cb4ef25979dffe2ac0f3e07afb34f01270bdb9452",
+    "core.py": "bd127aa04bfaef3d4522b1b5556d411f411db0d0459b4511dd926b55c3801b48",
+    "judge.py": "30fdb0e5e693ebbe171c0b85063b9ff0d33da21f8f5aeaacb1fe73b8a3f7683a",
+    "majparse.py": "bd8aa0f335632e27a9cad6776e30fdc6a72f988bc5215cffa909919b1fbfa112",
+    "simai.py": "7d47e64d0aeb35210e01e59f04c84b4e8d18e94f275b7047f0a362ebecc4de1c",
+    "slides.py": "5d09cff29061947c86ff9f9b22f76ce89bdaa063b64724c526caae5446d5dc6d",
+    "util.py": "a810451d9d48cb01448c96e67b243c3d85afa20bbffdab9f646428963c7af339",
+    "svg/parser.py": "fe23a65099caa47c633a24904e4cb91a24cd2a631a7d7da71bf02988ea6d4d7a",
+    "svg/path.py": "89f8505e414b53130c277dc66322dbf00071c1199b7b25c451b424e8847f8142",
+    "svg/__init__.py": "6569ec41f1794d22ee5d3b3689e70d3b728aab301a916ac83d97486e3c3cc3a1"
+  }
+}

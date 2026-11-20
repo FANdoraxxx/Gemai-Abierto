@@ -1,0 +1,23 @@
+{
+ "arch": "ar_g",
+ "hid": 128,
+ "nsamp": 16,
+ "temp": 1.0,
+ "folds": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "weights": "ar_g_f{f}.pt",
+ "post": {
+  "g": 0.4,
+  "alpha": 0.4,
+  "spread": 1.0,
+  "tail": 0.7,
+  "lvl": 1.0
+ },
+ "mb_mode": "mean",
+ "note": "cal3_g4 = post3.py ar_g, g=0.4 alpha=0.4 spread=1.0 tail=0.7 lvl=1.0; mu/sd/QREL from the 1621 train charts of ds.pkl"
+}

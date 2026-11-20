@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+out/mine/
+work/feats/
+release/gemai/work/feats_cache/
+work/hf_cache/modules/
+work/hf_cache/token
+work/hf_cache/hub/models--m-a-p--MERT-v1-330M/snapshots/*/pytorch_model.bin
+hf_token.txt

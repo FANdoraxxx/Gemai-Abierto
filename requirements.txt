@@ -1,0 +1,23 @@
+# PyTorch (CUDA 12.4) is installed by setup.bat from the PyTorch index:
+#   torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+# Versions below are the ones the release was tested with (Windows, Python 3.11.9).
+transformers==4.46.3
+tokenizers==0.20.3
+huggingface_hub==0.26.5
+safetensors==0.8.0
+numpy==2.4.6
+scipy==1.17.1
+scikit-learn==1.9.1
+soxr==1.1.0
+einops==0.8.2
+rotary-embedding-torch==0.9.1
+beat_this @ https://github.com/CPJKU/beat_this/archive/main.zip
+joblib==1.6.0
+lz4==4.4.5
+psutil==7.2.2
+cloudpickle==3.1.2
+tqdm==4.70.1
+rich==15.0.0
+PyYAML==6.0.3
+requests==2.34.2
+pillow==12.3.0
