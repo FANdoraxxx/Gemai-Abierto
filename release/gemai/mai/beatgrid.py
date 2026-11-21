@@ -17,6 +17,14 @@ Method (v3):
   5. optional tempo changes when params={"detect_changes": True}; disabled by default to reproduce sp0;
   6. bar phase (which beat is the downbeat) from the downbeat logits.
 
+Tempo changes (detect_changes=True), v3.1 additions (scratch/gridbench/CHANGES.md):
+  * stitch_chain: a tempo map need not be phase-continuous; every segment keeps its own tempo AND phase, junctions are
+    clean when the phases agree (<= 15 ms) and otherwise a one-beat transition segment carries the phase jump;
+  * pl_segments / pl_map: octave-normalised piecewise-linear segmentation of the tracker beats (tempo changes and phase
+    breaks), per-segment onset-fold refit, octave chosen relative to the neighbour unless the octave features are
+    decisive, neighbours merged unless two grids clearly beat one on the shorter segment;
+  * bpm_hint with an octave mismatch: boundary of the hint-octave start section from the subdivision-density step.
+
 Only numpy is needed for everything except `tracker_frames` / `estimate_grid` (torch + beat_this + ffmpeg).
 """
 from __future__ import annotations
@@ -72,6 +80,11 @@ DEFAULT_PARAMS = dict(
     raw_seg_hi=260.0,
     raw_chain_tol_ms=40.0,
     raw_chain_gain=1.035,
+    pl_scan_rel=0.02, pl_min_dur=3.0, pl_half_tol=0.35, pl_phase_extra=0.15, pl_gain=1.04, pl_gain_k=0.5, pl_final_gain=1.02,
+    pl_sig=0.010, pl_lam=25.0, pl_minlen=4,
+    hint_nonoct_ignore=True, hint_osplit=True, osplit_win=8.0, osplit_hop=2.0, osplit_min=3, osplit_step=0.6, osplit_gain=0.15, osplit_tmin=8.0,
+    pl=True, pl_anchor_hint=True, pl_oct="anchor", pl_oct_lo=60.0, pl_oct_hi=300.0, pl_oct_z=1.0, pl_oct_dur=8.0,
+    stitch=True, stitch_clean_ms=15.0, stitch_win_s=5.0, stitch_trans_cost=0.3,
 )
 
 
@@ -460,12 +473,12 @@ def _down_phase(dcurve, tfun, dur, shifts, gs_range, first_prior=0.0, start_prio
 
 
 # ------------------------------------------------------------------------------------------ octave
-def _octave_features(ev, b1, phi_c):
+def _octave_features(ev, b1, phi_c, t0=0.0, t1=None):
     """beat-subdivision energy of the onset fold at tempo b1 (relative to the beat peak)"""
     if ev.fold is None:
         return 0.0, 0.0
     P = 60.0 / b1
-    hs, nb = ev.fold.curve(P, 4.0)
+    hs, nb = ev.fold.curve(P, 4.0, t0, t1)
     bw = P * 1000.0 / nb
     c = int(round(phi_c / P * nb)) % nb
     w = int(round(35.0 / bw))
@@ -656,6 +669,98 @@ def tempo_segments(trk, prm, use_raw=False):
     return out
 
 
+# ------------------------------------------------------------------------------------------ piecewise-linear beat segmentation
+def _local_period(d, k=9):
+    r = k // 2
+    p = np.pad(d, r, mode="edge")
+    return np.median(np.lib.stride_tricks.sliding_window_view(p, k), axis=1)
+
+
+def index_local(tt, ss):
+    """integer beat index of raw tracker peaks with a running-median local period (robust to tempo changes)"""
+    t = np.asarray(tt, np.float64); s = np.asarray(ss, np.float64)
+    for _ in range(400):
+        if len(t) < 3:
+            break
+        d = np.diff(t)
+        bad = np.nonzero(d < 0.55 * _local_period(d))[0]
+        if len(bad) == 0:
+            break
+        i = bad[0]
+        drop = i if s[i] < s[i + 1] else i + 1
+        t = np.delete(t, drop); s = np.delete(s, drop)
+    d = np.diff(t)
+    steps = np.maximum(1, np.round(d / _local_period(d))).astype(int)
+    return t, s, np.concatenate([[0], np.cumsum(steps)])
+
+
+def _pl_dp(t, k, w, sig, lam, minlen):
+    """optimal piecewise-linear (t = a + P k) segmentation, cost = weighted SSE / sig^2 + lam per extra segment.
+    returns list of (start, end) index pairs"""
+    n = len(t)
+    tc = t - t.mean(); kc = (k - k.mean()).astype(np.float64)
+    cs = lambda x: np.concatenate([[0.0], np.cumsum(x)])
+    cw, ck, ct, ckk, ckt, ctt = cs(w), cs(w * kc), cs(w * tc), cs(w * kc * kc), cs(w * kc * tc), cs(w * tc * tc)
+    f = np.full(n + 1, np.inf); f[0] = -lam
+    prev = np.zeros(n + 1, int)
+    inv = 1.0 / (sig * sig)
+    for j in range(minlen, n + 1):
+        lo = np.arange(0, j - minlen + 1)
+        m = np.maximum(cw[j] - cw[lo], 1e-9)
+        sk = ck[j] - ck[lo]; st = ct[j] - ct[lo]
+        vk = (ckk[j] - ckk[lo]) - sk * sk / m
+        cv = (ckt[j] - ckt[lo]) - sk * st / m
+        sse = (ctt[j] - ctt[lo]) - st * st / m - np.where(vk > 1e-9, cv * cv / np.maximum(vk, 1e-9), 0.0)
+        cand = f[lo] + np.maximum(sse, 0.0) * inv + lam
+        b = int(np.argmin(cand))
+        f[j] = cand[b]; prev[j] = lo[b]
+    out = []
+    j = n
+    while j > 0:
+        out.append((int(prev[j]), j)); j = int(prev[j])
+    return out[::-1]
+
+
+def pl_segments(trk, prm):
+    """tempo/phase segments from piecewise-linear fits of the raw tracker beats, octave-normalised: the tracker's own
+    beat level may flip between 1x / 2x / 0.5x of the global pulse; such flips are not tempo changes.
+    returns list of dict(t0, t1, per, raw_bpm, n, a) (per = octave-normalised pulse period at the global pulse level)"""
+    if "tt" not in trk or len(trk["tt"]) < 2 * prm["pl_minlen"] + 2:
+        return None
+    t = np.asarray(trk["tt"], np.float64)
+    Pg = 60.0 / trk["b_reg"]
+    d = np.diff(t)
+    r = d / Pg
+    cand = np.array([0.25, 0.5, 1.0, 2.0, 4.0])
+    o = np.argmin(np.abs(np.log(r[:, None] / cand[None, :])), axis=1)
+    u = cand[o]
+    k = np.concatenate([[0.0], np.cumsum(u)])
+    if len(t) < 2 * prm["pl_minlen"] + 2:
+        return None
+    w = np.ones(len(t))
+    segs = None
+    for it in range(3):
+        segs = _pl_dp(t, k, w, prm["pl_sig"], prm["pl_lam"], prm["pl_minlen"])
+        res = np.zeros(len(t))
+        for a, b in segs:
+            X = np.stack([np.ones(b - a), k[a:b] - k[a]], axis=1)
+            beta = np.linalg.lstsq(X * np.sqrt(w[a:b, None]), t[a:b] * np.sqrt(w[a:b]), rcond=None)[0]
+            res[a:b] = t[a:b] - X @ beta
+        sc = max(0.006, 1.4826 * np.median(np.abs(res)))
+        w = np.where(np.abs(res) < 3 * sc, 1.0, 0.05)
+    out = []
+    for a, b in segs:
+        X = np.stack([np.ones(b - a), (k[a:b] - k[a]).astype(np.float64)], axis=1)
+        sw = np.sqrt(w[a:b])
+        beta = np.linalg.lstsq(X * sw[:, None], t[a:b] * sw, rcond=None)[0]
+        per = float(beta[1])
+        if per <= 0.05:
+            per = Pg
+        out.append(dict(a=a, b=b, t0=float(t[a]), t1=float(t[b - 1]), per=per, raw_bpm=60.0 / per,
+                        n=int(round(k[b - 1] - k[a])), u=float(np.median(u[a:b - 1])) if b - a > 1 else 1.0))
+    return out
+
+
 def _seg_phase(ev, P, prm, t0, t1):
     dbg = {}
     return _fine_phase(ev, P, prm, dbg, max(0.0, t0 - P), t1 + P)
@@ -783,6 +888,244 @@ def refine_segments(ev, segs, f, b_glob, prm, dbg=None):
     return res
 
 
+# ------------------------------------------------------------------------------------------ independent per-segment map
+def _grid(b, phi, t0, t1):
+    P = 60.0 / b
+    n0 = int(math.ceil((t0 - phi) / P)); n1 = int(math.floor((t1 - phi) / P))
+    return phi + np.arange(n0, n1 + 1) * P
+
+
+def _fit_span(ev, b_guess, t0, t1, prm, rel=0.02, snap_scale=True):
+    """tempo + phase of the span [t0, t1] from the onset events: fold scan around b_guess, snap, comb+fold phase"""
+    span = max(t1 - t0, 1.0)
+    te, we = ev.events_in(t0 - 0.3, t1 + 0.3)
+    b = float(b_guess)
+    if len(te) >= 12:
+        r = scan_bpm(te, we, [b_guess], rel, 6.0, 4.0, ntop=2)
+        if r:
+            b = r[0]
+    tol = min(0.25, max(0.03, 0.03 * 140.0 / span))
+    r_ = round(b)
+    b = float(r_) if abs(b - r_) <= tol else float(round(b, 2))
+    P = 60.0 / b
+    phi = _seg_phase(ev, P, prm, t0, t1)
+    return b, float(phi)
+
+
+def _span_align(ev, b, phi, t0, t1):
+    g = _grid(b, phi, t0, t1)
+    return ev.align(g) if len(g) else 0.0
+
+
+def pl_map(ev, trk, f, b_glob, prm, dbg=None):
+    """tempo map from the octave-normalised piecewise-linear tracker segmentation; every segment keeps its own tempo and
+    phase, neighbours are merged unless two grids clearly beat one.  returns (segs, raw_segs) or (None, None)"""
+    raw = pl_segments(trk, prm)
+    if not raw or len(raw) <= 1:
+        return None, raw
+    segs = []
+    anchor = max(range(len(raw)), key=lambda i: raw[i]["t1"] - raw[i]["t0"])
+    bref = [None] * len(raw)
+    order = [anchor] + [i for d in range(1, len(raw)) for i in (anchor - d, anchor + d) if 0 <= i < len(raw)]
+    fin = {}
+    for i in order:
+        sg = raw[i]
+        b1 = 60.0 / (sg["per"] * max(sg.get("u", 1.0), 0.25))            # the tracker's own beat level in this segment
+        t0, t1 = sg["t0"], sg["t1"]
+        if i != anchor and prm["pl_oct"] == "hyb":
+            P1 = 60.0 / b1
+            phi_c, _ = ev.comb.best_phase_for(P1, t0, t1)
+            f_q, f_off = _octave_features(ev, b1, phi_c, max(0.0, t0 - 0.3), t1 + 0.3)
+            fs_f = octave_factor(b1, f_q, f_off, prm)
+            nb = fin[i - 1] if i > anchor else fin[i + 1]
+            b_near = b1 * 2.0 ** round(math.log2(nb / b1))
+            w = prm["oct_w"]
+            z = w[0] + w[1] * (b1 - 115.0) / 10.0 + w[2] * f_q + w[3] * f_off
+            det = b1 > prm["oct_halve"] or b1 < prm["oct_always"] or b1 >= prm["oct_never"]
+            strong = det or abs(z) > prm["pl_oct_z"]
+            if strong and (t1 - t0) >= prm["pl_oct_dur"]:
+                b_g = b1 * fs_f
+            else:
+                b_g = b_near
+            fs = b_g / b1
+        elif i != anchor and prm["pl_oct"] == "anchor":
+            cands = [b1 * 2.0 ** j for j in range(-3, 4) if prm["pl_oct_lo"] <= b1 * 2.0 ** j <= prm["pl_oct_hi"]]
+            if not cands:
+                cands = [b1]
+            b_g = min(cands, key=lambda c: abs(math.log(c / b_glob)))
+            fs = b_g / b1
+        elif prm["pl_oct"] == "feat" or i == anchor:
+            P1 = 60.0 / b1
+            phi_c, _ = ev.comb.best_phase_for(P1, t0, t1)
+            f_q, f_off = _octave_features(ev, b1, phi_c, max(0.0, t0 - 0.3), t1 + 0.3)
+            fs = octave_factor(b1, f_q, f_off, prm)
+            b_g = b1 * fs
+            if i == anchor and prm["pl_oct"] != "feat":
+                b_g = b1 * 2.0 ** round(math.log2(b_glob / b1))          # the anchor follows the global tempo octave
+        else:
+            nb = fin[i - 1] if i > anchor else fin[i + 1]
+            b_g = b1 * 2.0 ** round(math.log2(nb / b1))
+            fs = b_g / b1
+        b, phi = _fit_span(ev, b_g, t0, t1, prm, prm["pl_scan_rel"])
+        fin[i] = b
+        segs.append((i, dict(t0=t0, t1=t1, b=b, phi=phi, P=60.0 / b, n=sg["n"], b1=b1, fs=fs)))
+    segs = [d for _, d in sorted(segs, key=lambda x: x[0])]
+    # tiny segments are tracker wobble: absorb them into the longer neighbour before any test
+    while len(segs) > 1:
+        dur = [x["t1"] - x["t0"] for x in segs]
+        i = int(np.argmin(dur))
+        if dur[i] >= prm["pl_min_dur"]:
+            break
+        nb = [j for j in (i - 1, i + 1) if 0 <= j < len(segs)]
+        j = max(nb, key=lambda q: dur[q])
+        a, c = (segs[min(i, j)], segs[max(i, j)])
+        t0, t1 = a["t0"], c["t1"]
+        keep = segs[j]
+        b, phi = _fit_span(ev, keep["b"], t0, t1, prm, prm["pl_scan_rel"])
+        segs[min(i, j):max(i, j) + 1] = [dict(t0=t0, t1=t1, b=b, phi=phi, P=60.0 / b, n=a["n"] + c["n"], b1=keep["b1"], fs=keep["fs"])]
+    if dbg is not None:
+        dbg["pl_raw"] = [(round(x["t0"], 1), round(x["t1"], 1), round(x["b"], 2), round(x["b1"], 1), x["fs"]) for x in segs]
+
+    def union(a, c):
+        t0, t1 = a["t0"], c["t1"]
+        wa = max(a["t1"] - a["t0"], 1e-3); wc = max(c["t1"] - c["t0"], 1e-3)
+        bg = (a["b"] * wa + c["b"] * wc) / (wa + wc)
+        b, phi = _fit_span(ev, bg, t0, t1, prm, prm["pl_scan_rel"])
+        return dict(t0=t0, t1=t1, b=b, phi=phi, P=60.0 / b, n=a["n"] + c["n"], b1=a["b1"], fs=a["fs"])
+
+    def octrel(x, y):
+        r = x / y
+        return abs(r - 2) < 0.08 or abs(r - 0.5) < 0.04
+
+    cache = {}
+
+    def gain(i):
+        a, c = segs[i], segs[i + 1]
+        key = (round(a["t0"], 3), round(a["t1"], 3), round(a["b"], 3), round(c["t1"], 3), round(c["b"], 3), round(c["phi"], 4), round(a["phi"], 4))
+        if key in cache:
+            return cache[key]
+        if octrel(a["b"], c["b"]):
+            cache[key] = (99.0, None)
+            return cache[key]
+        u = union(a, c)
+        sh = a if (a["t1"] - a["t0"]) <= (c["t1"] - c["t0"]) else c
+        g_own = _grid(sh["b"], sh["phi"], sh["t0"], sh["t1"])
+        g_un = _grid(u["b"], u["phi"], sh["t0"], sh["t1"])
+        nbt = max(len(g_own), 1)
+        a_own = ev.align(g_own) if len(g_own) else 0.0
+        a_un = ev.align(g_un) if len(g_un) else 0.0
+        r = a_own / max(a_un, 1e-9)
+        sc_ = r - prm["pl_gain_k"] / math.sqrt(nbt)
+        if abs(a["b"] / c["b"] - 1) < 0.004:                    # phase-only break: demand more, never a half-beat shift
+            d = ((c["phi"] - a["phi"] + a["P"] / 2) % a["P"]) - a["P"] / 2
+            if abs(d) > prm["pl_half_tol"] * a["P"]:
+                sc_ = -1.0
+            else:
+                sc_ -= prm["pl_phase_extra"]
+        cache[key] = (sc_, u)
+        return cache[key]
+
+    log = []
+    while len(segs) > 1:
+        gs = [gain(i) for i in range(len(segs) - 1)]
+        i = int(np.argmin([g[0] for g in gs]))
+        if gs[i][0] >= prm["pl_gain"]:
+            break
+        log.append((round(segs[i]["t0"], 1), round(segs[i + 1]["t1"], 1), round(gs[i][0], 3)))
+        segs[i:i + 2] = [gs[i][1]]
+    if dbg is not None:
+        dbg["pl_merged"] = log
+        dbg["pl_gains"] = [round(gain(i)[0], 3) for i in range(len(segs) - 1)]
+    return segs, raw
+
+
+def hint_first(segs, ev, prm, hint):
+    """a user tempo hint fixes the tempo of the first segment exactly (changing it later would shift every later beat);
+    when the first segment is an octave away from the hint only that segment is rescaled"""
+    if hint is None or not segs:
+        return segs
+    s0 = segs[0]
+    r = s0["b"] / hint
+    k = math.log2(r)
+    if s0["b"] != hint and (abs(r - 1.0) < 0.015 or (len(segs) > 1 and abs(k - round(k)) < 0.03 and abs(round(k)) <= 2)):
+        n0 = dict(s0, b=float(hint), P=60.0 / hint)
+        phi = _seg_phase(ev, n0["P"], prm, n0["t0"], n0["t1"])
+        if abs(r - 1.0) >= 0.015 and r < 1.0:
+            # the hint doubled the segment: the old grid's phase is a candidate for the on-beat phase
+            def _al(ph):
+                g = _grid(hint, ph, n0["t0"], n0["t1"])
+                return ev.align(g) if len(g) else 0.0
+            if _al(s0["phi"]) > _al(phi):
+                phi = s0["phi"]
+        n0["phi"] = phi
+        return [n0] + list(segs[1:])
+    return segs
+
+
+def octave_split(ev, hint, b_auto, dur, prm):
+    """The hint is an octave away from the auto tempo: the start section is notated in the hint octave, the rest in the
+    auto octave.  Locate the boundary as the single step of the subdivision-density index of the onset fold (charts are
+    notated at the faster octave when the music is dense).  returns (t_split, step) or None"""
+    if ev.fold is None:
+        return None
+    L = min(hint, b_auto)
+    P = 60.0 / L
+    ws, hop = prm["osplit_win"], prm["osplit_hop"]
+    cs = np.arange(0.0, dur - ws + 1e-9, hop)
+    if len(cs) < 2 * prm["osplit_min"] + 2:
+        return None
+    w = prm["oct_w"]
+    u = np.zeros(len(cs))
+    for i, t0 in enumerate(cs):
+        phi_c, _ = ev.comb.best_phase_for(P, t0, t0 + ws)
+        fq, fo = _octave_features(ev, L, phi_c, t0, t0 + ws)
+        u[i] = w[2] * fq + w[3] * fo
+    n = len(u); mn = prm["osplit_min"]
+    sse0 = float(((u - u.mean()) ** 2).sum()) + 1e-9
+    best = None
+    for m in range(mn, n - mn + 1):
+        a, c = u[:m], u[m:]
+        sse = float(((a - a.mean()) ** 2).sum() + ((c - c.mean()) ** 2).sum())
+        if best is None or sse < best[0]:
+            best = (sse, m, float(c.mean() - a.mean()))
+    sse, m, step = best
+    if hint <= b_auto + 1e-6 and step <= 0:
+        return None
+    if hint > b_auto and step >= 0:
+        return None
+    if abs(step) < prm["osplit_step"] or (sse0 - sse) / sse0 < prm["osplit_gain"] or cs[m] < prm["osplit_tmin"]:
+        return None
+    return float(cs[m]), step
+
+
+def apply_octave_split(segs, t_split, k, hint, ev, prm):
+    """segs (auto octave) -> segments before t_split rescaled by k (octave of the hint), later ones kept"""
+    out = []
+    for sg in segs:
+        if sg["t1"] <= t_split:
+            parts = [(sg, True)]
+        elif sg["t0"] >= t_split:
+            parts = [(sg, False)]
+        else:
+            parts = [(dict(sg, t1=t_split), True), (dict(sg, t0=t_split), False)]
+        for q, scaled in parts:
+            if not scaled:
+                out.append(q)
+                continue
+            b = q["b"] * k
+            P = 60.0 / b
+            phi = _seg_phase(ev, P, prm, q["t0"], q["t1"])
+            if k > 1.0:
+                al = lambda ph: (ev.align(_grid(b, ph, q["t0"], q["t1"])) if len(_grid(b, ph, q["t0"], q["t1"])) else 0.0)
+                if al(q["phi"]) > al(phi):
+                    phi = q["phi"]
+            out.append(dict(q, b=b, P=P, phi=phi))
+    if out and abs(out[0]["b"] / hint - 1.0) < 0.015 and out[0]["b"] != hint:
+        out[0] = dict(out[0], b=float(hint), P=60.0 / hint)
+        out[0]["phi"] = _seg_phase(ev, out[0]["P"], prm, out[0]["t0"], out[0]["t1"])
+    return out
+
+
 def merge_short_segment(segs, ev, prm):
     """Merge the segment pair with the worst junction phase mismatch (or the shortest segment), preserving the longer neighbour's tempo."""
     if len(segs) <= 1:
@@ -869,6 +1212,69 @@ def build_chain(segs, prm):
     return dict(phi0=segs[0]["phi"], P0=segs[0]["P"], gj=gj, bpms=[s["b"] for s in segs], errs=errs)
 
 
+def stitch_chain(segs, ev, prm):
+    """Like build_chain, but never fails: every segment keeps its own tempo AND phase.  At a junction the new grid is
+    continued from the last old beat when the two phases agree (|d| <= stitch_clean_ms); otherwise a one-beat
+    transition segment (bpm = 60 / interval) jumps from the last old-grid beat to the first beat of the new grid."""
+    gj = []
+    bpms = [segs[0]["b"]]
+    errs = []
+    off = 0
+    W = prm["chain_win"]
+    clean_s = prm["stitch_clean_ms"] / 1000.0
+    for j in range(len(segs) - 1):
+        sj, sk = segs[j], segs[j + 1]
+        Tb = 0.5 * (sj["t1"] + sk["t0"])
+        Pj, Pk = sj["P"], sk["P"]
+        Pa = 0.5 * (Pj + Pk)
+        mc = int(round((Tb - sj["phi"]) / Pj))
+        tw = prm["stitch_win_s"]
+        best = None
+        for m in range(mc - W, mc + W + 1):
+            tau = sj["phi"] + m * Pj
+            n = int(round((tau - sk["phi"]) / Pk))
+            d = tau - (sk["phi"] + n * Pk)
+            snap = 0.0 if (m + off) % 4 == 0 else (0.15 if (m + off) % 2 == 0 else 0.3)
+            bj = tau - Pj * np.arange(0, int(tw / Pj) + 1)
+            if abs(d) <= clean_s:
+                bk = tau + Pk * np.arange(1, int(tw / Pk) + 1)
+                trans = 0.0
+                n_after = 1
+            else:
+                n2 = n + 1
+                while sk["phi"] + n2 * Pk - tau < 0.7 * Pa:
+                    n2 += 1
+                while n2 > n + 1 and sk["phi"] + (n2 - 1) * Pk - tau >= 0.7 * Pa:
+                    n2 -= 1
+                t2 = sk["phi"] + n2 * Pk
+                bk = t2 + Pk * np.arange(0, int(tw / Pk) + 1)
+                trans = prm["stitch_trans_cost"]
+            sc = 0.5 * (ev.align(bj) + ev.align(bk))
+            cost = -sc + trans + snap + 0.05 * abs(tau - Tb) / Pj
+            if best is None or cost < best[0]:
+                best = (cost, m, n, d, tau)
+        _, m, n, d, tau = best
+        g = m + off
+        if abs(d) <= clean_s:
+            gj.append(g); bpms.append(sk["b"])
+            off = g - n
+            errs.append(d * 1000.0)
+        else:
+            n2 = n + 1
+            Pa_ = Pa
+            while sk["phi"] + n2 * Pk - tau < 0.7 * Pa_:
+                n2 += 1
+            while n2 > n + 1 and sk["phi"] + (n2 - 1) * Pk - tau >= 0.7 * Pa_:
+                n2 -= 1
+            t2 = sk["phi"] + n2 * Pk
+            bt = 60.0 / (t2 - tau)
+            gj.append(g); bpms.append(float(bt))
+            gj.append(g + 1); bpms.append(sk["b"])
+            off = g + 1 - n2
+            errs.append(0.0)
+    return dict(phi0=segs[0]["phi"], P0=segs[0]["P"], gj=gj, bpms=bpms, errs=errs, stitched=True)
+
+
 def chain_times(chain, g):
     """time (s) of chain beat g (integer array) ; chain beats before the first junction use the first tempo"""
     beats = np.array([-1000.0] + [float(x) for x in chain["gj"]])
@@ -910,6 +1316,7 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
     # when the tracker finds no beats, the hint is used as a constant tempo (the old behaviour).
     hint_changes = bpm_hint is not None and bool(prm.get("detect_changes"))
     b_auto = None
+    osplit = None
     if hint_changes:
         trk = tracker_tempo(bl)
     if bpm_hint is not None and trk is None:
@@ -945,7 +1352,17 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
         b = snap_bpm(b, prm)
         if f == 0.5:
             shifts = [0.0, 0.5]
-        if hint_changes:
+        if hint_changes and prm.get("hint_nonoct_ignore") and abs(math.log2(float(bpm_hint) / b) - round(math.log2(float(bpm_hint) / b))) > 0.03:
+            # not an octave of the auto tempo: the hint is the tempo of an early section only, the song is tracked freely
+            hint_changes = False
+            dbg["hint_ignored"] = True
+        osplit = None
+        if hint_changes and prm.get("hint_osplit") and abs(math.log2(float(bpm_hint) / b)) > 0.5:
+            osplit = octave_split(ev, float(bpm_hint), b, dur, prm)
+            if osplit is not None:
+                osplit_k = 2.0 ** round(math.log2(float(bpm_hint) / b))
+                dbg["osplit"] = (round(osplit[0], 1), round(osplit[1], 2), osplit_k)
+        if hint_changes and osplit is None:
             k = 2.0 ** round(math.log2(float(bpm_hint) / b))
             f *= k
             b_auto = b
@@ -975,6 +1392,7 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
 
     # ---- tempo changes (only with an onset envelope and the tracker; with a bpm hint only in "hint+changes" mode)
     chain = None
+    best_segs = None
     if prm["detect_changes"] and trk is not None and ev.fold is not None:
         tk = phi + np.arange(-8, int(dur / P) + 16) * P
         tk = tk[(tk >= 0) & (tk <= dur)]
@@ -1004,8 +1422,17 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
             for _attempt in range(4):
                 if len(cur) <= 1:
                     break
-                ch = build_chain(cur, m_prm)
-                if ch is not None:
+                chs = []
+                if hint_changes and osplit is None:
+                    cur = hint_first(cur, ev, m_prm, bpm_hint)
+                ch0 = build_chain(cur, m_prm)
+                if ch0 is not None:
+                    chs.append(ch0)
+                if prm.get("stitch"):
+                    chs.append(stitch_chain(cur, ev, m_prm))
+                if not chs:
+                    fails += 1
+                for ch in chs:
                     gg = np.arange(-8, int(dur / (60.0 / max(ch["bpms"]))) + 16)
                     tc = chain_times(ch, gg)
                     tc = tc[(tc >= 0) & (tc <= dur)]
@@ -1015,8 +1442,6 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
                         best_cand = (key, ch, a_ch, cur, m_prm["chain_gain"])
                     if use_raw and key[0] >= m_prm["chain_gain"]:
                         break
-                else:
-                    fails += 1
                 if len(cur) > 1:
                     cur = merge_short_segment(cur, ev, m_prm)
             return segs0, segs, fails, best_cand
@@ -1024,14 +1449,37 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
         segs0_idx, segs_idx, fails_idx, cand_idx = _try_mode(False)
         segs0_raw, segs_raw, fails_raw, cand_raw = (_try_mode(True) if "tt" in trk else (None, None, 0, None))
 
+        cand_pl = None
+        segs_pl = raw_pl = None
+        if prm.get("pl"):
+            segs_pl, raw_pl = pl_map(ev, trk, f, (b_auto if (hint_changes and b_auto and not prm.get("pl_anchor_hint")) else b), prm, dbg)
+            if segs_pl is not None and hint_changes and osplit is None:
+                segs_pl = hint_first(segs_pl, ev, prm, bpm_hint)
+            if segs_pl is not None and len(segs_pl) > 1:
+                ch = stitch_chain(segs_pl, ev, prm)
+                gg = np.arange(-8, int(dur / (60.0 / max(ch["bpms"]))) + 16)
+                tc = chain_times(ch, gg); tc = tc[(tc >= 0) & (tc <= dur)]
+                a_ch = ev.align(tc)
+                cand_pl = ((a_ch / max(a_k, 1e-9), -len(ch["bpms"])), ch, a_ch, segs_pl, prm["pl_final_gain"])
+        if prm.get("dbg_cands"):
+            dbg["cands"] = {}
+            for nm_, cn_ in (("idx", cand_idx), ("raw", cand_raw), ("pl", cand_pl)):
+                if cn_ is not None:
+                    dbg["cands"][nm_] = (cn_[1], float(cn_[0][0]))
+            dbg["cands"]["const"] = (dict(phi0=float(phi), P0=float(P), gj=[], bpms=[float(b)], errs=[]), 1.0)
         valid_cands = []
         for mode_name, s0, s_ref, fls, cnd in (("idx", segs0_idx, segs_idx, fails_idx, cand_idx),
-                                                ("raw", segs0_raw, segs_raw, fails_raw, cand_raw)):
+                                                ("raw", segs0_raw, segs_raw, fails_raw, cand_raw),
+                                                ("pl", raw_pl, segs_pl, 0, cand_pl)):
             if cnd is not None and cnd[0][0] >= cnd[4]:
                 valid_cands.append((cnd[0], mode_name, s0, s_ref, fls, cnd))
 
         if valid_cands:
             valid_cands.sort(key=lambda x: x[0], reverse=True)
+            if prm.get("pl_first"):
+                pls = [c for c in valid_cands if c[1] == "pl"]
+                if pls:
+                    valid_cands = pls + [c for c in valid_cands if c[1] != "pl"]
             _, mode_name, s0, s_ref, fls, best_candidate = valid_cands[0]
             key, ch, a_ch, best_segs, _ = best_candidate
             dbg["seg_mode"] = mode_name
@@ -1055,6 +1503,16 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
                 dbg["chain_ratio"] = round(key[0], 3)
             if s0 is not None and len(s0) > 1:
                 dbg["chain"] = "failed" if fls else "weak"
+
+    # ---- hint octave section: the start section is notated in the hint octave
+    if osplit is not None:
+        segs_o = best_segs if chain is not None else [dict(t0=0.0, t1=dur, b=float(b), phi=float(phi), P=float(P), n=1)]
+        segs_o = apply_octave_split(segs_o, osplit[0], osplit_k, float(bpm_hint), ev, prm)
+        if len(segs_o) > 1:
+            chain = stitch_chain(segs_o, ev, prm)
+        else:
+            b = float(segs_o[0]["b"]); P = 60.0 / b; phi = float(segs_o[0]["phi"]); chain = None
+        dbg["mode"] = "hint+changes+osplit"
 
     # ---- bar phase
     if chain is None:
