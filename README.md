@@ -9,9 +9,9 @@
 ## 环境
 
 - Windows 10/11（启动脚本是 .bat）
-- Python 3.11
+- 64 位 CPython 3.11 或 3.12
 - 显卡可选：
-  - 有 NVIDIA 显卡（驱动支持 CUDA 12.4）：用显卡生成，快速档一首歌约 1–2 分钟；
+  - 有 NVIDIA 显卡（驱动支持所选 CUDA 版本）：用显卡生成，快速档一首歌约 1–2 分钟；
   - 没有 NVIDIA 显卡：自动改用 CPU，快速档一首约 3–5 分钟（实测 16 线程 CPU：MERT 特征约 2 分钟、写谱约 1.5 分钟），精细档约 3 倍。
 - 约 4 GB 磁盘空间（仓库约 1.6 GB，PyTorch 另计）
 - MERT 音乐模型和 ffmpeg 已经包含在仓库里，不需要另外下载。
@@ -19,10 +19,11 @@
 ## 安装
 
 1. 克隆本仓库。
-2. 双击 `setup.bat`。它会创建 `.venv`，并安装 PyTorch 2.6 和 `requirements.txt` 里的依赖：
-   - 检测到 NVIDIA 显卡（`nvidia-smi` 可用）时装 CUDA 12.4 版；
-   - 否则装 CPU 版。
-   - 想强制指定：先 `set GEMAI_TORCH_INDEX=https://download.pytorch.org/whl/cpu`（或 `.../whl/cu124`）再运行。
+2. 双击 `setup.bat`，创建 `.venv` 并安装 PyTorch 和 `requirements.txt` 里的依赖。
+   - 检测到 RTX 50 系列等计算能力为 12.x 的 NVIDIA 显卡时，安装 PyTorch 2.7（CUDA 12.8）。
+   - 其他能通过 `nvidia-smi` 检测到的 NVIDIA 显卡默认使用 PyTorch 2.6（CUDA 12.4）。未检测到 NVIDIA 显卡时使用 PyTorch 2.6（CPU）。
+   - 在命令提示符中可通过 `set GEMAI_TORCH_INDEX=https://download.pytorch.org/whl/cpu` 强制安装 CPU 版，也可指定 `cu124` 或 `cu128` 的索引。
+   - 如果脚本提示 `.venv` 的 Python 版本不受支持，先重命名 `.venv` 再运行。也可以在创建环境前将 `MAI_PYTHON` 指向兼容的 `python.exe`。
 
 ## 使用
 

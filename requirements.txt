@@ -1,5 +1,4 @@
-# PyTorch (CUDA 12.4) is installed by setup.bat from the PyTorch index:
-#   torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+# setup.bat installs PyTorch from the appropriate CUDA or CPU index.
 # Versions below are the ones the release was tested with (Windows, Python 3.11.9).
 transformers==4.46.3
 tokenizers==0.20.3
