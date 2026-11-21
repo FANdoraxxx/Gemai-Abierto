@@ -905,11 +905,19 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
     shifts = [0.0]
     f = 1.0
     trk = None
-    if bpm_hint is not None:
+    # bpm_hint + detect_changes: the hint fixes the tempo OCTAVE of the start of the song (e.g. auto said 130, the
+    # song is 260); tempo changes are still detected, relative to the hinted octave.  Without detect_changes, or
+    # when the tracker finds no beats, the hint is used as a constant tempo (the old behaviour).
+    hint_changes = bpm_hint is not None and bool(prm.get("detect_changes"))
+    b_auto = None
+    if hint_changes:
+        trk = tracker_tempo(bl)
+    if bpm_hint is not None and trk is None:
         b = float(bpm_hint)
         dbg["mode"] = "hint"
     else:
-        trk = tracker_tempo(bl)
+        if trk is None:
+            trk = tracker_tempo(bl)
         if trk is None:
             dbg["fail"] = "no beats"
             return dict(first=0.0, beats=[0.0], bpms=[120.0], debug=dbg)
@@ -937,13 +945,35 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
         b = snap_bpm(b, prm)
         if f == 0.5:
             shifts = [0.0, 0.5]
+        if hint_changes:
+            k = 2.0 ** round(math.log2(float(bpm_hint) / b))
+            f *= k
+            b_auto = b
+            b = float(bpm_hint)
+            shifts = [0.0, 0.5] if f < 1.0 else [0.0]
+            # local-tempo octave ranges must contain the hinted tempo (only widened, never narrowed)
+            prm["seg_lo"] = min(prm["seg_lo"], b / 1.25); prm["seg_hi"] = max(prm["seg_hi"], b * 1.3)
+            prm["raw_seg_lo"] = min(prm.get("raw_seg_lo", 105.0), b / 1.25); prm["raw_seg_hi"] = max(prm.get("raw_seg_hi", 260.0), b * 1.3)
+            dbg["mode"] = "hint+changes"; dbg["hint_octave_k"] = k
     P = 60.0 / b
 
     # ---- constant-tempo phase
     phi = _fine_phase(ev, P, prm, dbg)
+    if hint_changes and dbg.get("hint_octave_k", 1.0) > 1.0:
+        # the hint doubled the auto tempo: the auto beats are every k-th true beat, so their phase is a
+        # candidate for the true phase (the fold at the doubled period cannot tell the on- from the off-beat)
+        phi_a = float(_fine_phase(ev, 60.0 / b_auto, prm, {})) % P
+
+        def _al(ph):
+            tk = ph + np.arange(-8, int(dur / P) + 16) * P
+            return ev.align(tk[(tk >= 0) & (tk <= dur)])
+
+        if _al(phi_a) > _al(phi):
+            phi = phi_a
+            dbg["phase_from_auto"] = True
     dbg["phi"] = float(phi); dbg["b"] = float(b); dbg["octave_f"] = float(f)
 
-    # ---- tempo changes (only with an onset envelope and the tracker; never with a bpm hint)
+    # ---- tempo changes (only with an onset envelope and the tracker; with a bpm hint only in "hint+changes" mode)
     chain = None
     if prm["detect_changes"] and trk is not None and ev.fold is not None:
         tk = phi + np.arange(-8, int(dur / P) + 16) * P
@@ -1054,6 +1084,8 @@ def grid_from_frames(bl, dl, dur, bpm_hint=None, params=None, onset=None):
         beats = [0.0] + [float(x - g0) for x in chain["gj"][j0:]]
         bpms = [float(x) for x in chain["bpms"][j0:]]
         dbg["chain"] = True
+    if hint_changes and bpms and abs(bpms[0] / float(bpm_hint) - 1.0) < 0.015:
+        bpms[0] = float(bpm_hint)                       # the user's tempo for the start, exactly
     dbg["snapped"] = [round(x, 3) for x in bpms]
     return dict(first=float(first), beats=beats, bpms=bpms, debug=dbg)
 
